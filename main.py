@@ -72,15 +72,26 @@ def process_files(product_sales_file, wastage_sales_file):
         .reset_index()
     )
 
+
     avg_data_long = avg_data.copy()
     avg_data_long['Item'] = avg_data_long['Item'].astype(str).str.split('-', n=1).str[1]
     avg_data_long['Outlet'] = avg_data_long['Outlet'].astype(str).str.split('-KOMUGI', n=1).str[1]
 
+    # Reorder columns
+    desired_order = ['Outlet', 'Item', 'Day Type', 'Qty', 'Wastage Qty', 'Sales', 'Wastage Sales']
+    avg_data_long = avg_data_long[desired_order]
+
     # Round numeric columns
-    numeric_cols = ['Sales', 'Qty', 'Wastage Sales', 'Wastage Qty']
-    for col in numeric_cols:
+    numeric_cols_0 = ['Qty', 'Wastage Qty']
+    for col in numeric_cols_0:
         nums = pd.to_numeric(avg_data_long[col], errors='coerce')
         rounded = nums.round(0)
+        avg_data_long[col] = np.where(nums.notna(), rounded, avg_data_long[col])
+
+    numeric_cols_2 = ['Sales', 'Wastage Sales']
+    for col in numeric_cols_2:
+        nums = pd.to_numeric(avg_data_long[col], errors='coerce')
+        rounded = nums.round(2)
         avg_data_long[col] = np.where(nums.notna(), rounded, avg_data_long[col])
 
     # Reorder day type
@@ -119,6 +130,17 @@ def process_files(product_sales_file, wastage_sales_file):
     red_fill = PatternFill(start_color="F2DCDB", end_color="F2DCDB", fill_type="solid")
 
     for ws in wb.worksheets:
+
+        col_map = {cell.value: idx + 1 for idx, cell in enumerate(ws[1])}
+
+        # Apply currency formatting to Sales & Wastage Sales if present
+        for col_name in ["Sales", "Wastage Sales"]:
+            if col_name in col_map:
+                col_idx = col_map[col_name]
+                for row in range(2, ws.max_row + 1):  # skip header
+                    cell = ws.cell(row=row, column=col_idx)
+                    if isinstance(cell.value, (int, float)):
+                        cell.number_format = u'"RM"#,##0.00'
         # Find Item column
         item_col = None
         for idx, cell in enumerate(ws[1], 1):
@@ -152,17 +174,25 @@ def process_files(product_sales_file, wastage_sales_file):
                 elif item_val in top_bottom[outlet_name]['bottom']:
                     ws.cell(row=row, column=item_col).fill = red_fill
 
-        # Auto-adjust width
+        # Auto-adjust width with extra space for currency columns
         for col in ws.columns:
             max_length = 0
             col_letter = get_column_letter(col[0].column)
+            header = col[0].value if col[0].value else ""
             for cell in col:
                 try:
                     if cell.value:
                         max_length = max(max_length, len(str(cell.value)))
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
                 except:
                     pass
-            ws.column_dimensions[col_letter].width = max_length + 2
+            # Add extra padding for Sales columns so RM formatting fits
+            if header in ["Sales"]:
+                ws.column_dimensions[col_letter].width = max_length + 8
+            elif header in ["Qty"]:
+                ws.column_dimensions[col_letter].width = max_length + 6
+            else:
+                ws.column_dimensions[col_letter].width = max_length + 2
 
     wb.save(output_file_path)
     return output_file_path
@@ -178,7 +208,8 @@ wastage_file = st.file_uploader("Wastage Sales File", type="xlsx")
 if st.button("Generate Report"):
     if product_file and wastage_file:
         try:
-            output_path = process_files(product_file, wastage_file)
+            with st.spinner("Processing files..."):
+                output_path = process_files(product_file, wastage_file)
             with open(output_path, "rb") as f:
                 st.download_button("⬇️ Download Report", f, file_name="avg_sales_by_outlet.xlsx")
             st.success("Report generated successfully!")
