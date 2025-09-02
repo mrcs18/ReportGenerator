@@ -329,7 +329,7 @@ if st.button("Generate Report"):
             with st.spinner("Processing files..."):
                 output_path = process_files(product_file, wastage_file, forecast_file)
             with open(output_path, "rb") as f:
-                st.download_button("⬇️ Download Report", f, file_name="avg_sales_by_outlet.xlsx")
+                st.download_button("⬇️ Download Report", f, file_name="forecast_comparison.xlsx")
             st.success("Report generated successfully!")
         except Exception as e:
             st.error(f"Error: {e}")
