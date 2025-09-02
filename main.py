@@ -15,7 +15,7 @@ def classify_day(x):
     elif x == 6:
         return 'Sunday'
 
-def process_files(product_sales_file, wastage_sales_file):
+def process_files(product_sales_file, wastage_sales_file, forecast_file=None):
     # Columns we care about
     cols_needed = ["Outlet", "Item", "Business Date", "Net Sales", "Item Qty"]
 
@@ -98,6 +98,7 @@ def process_files(product_sales_file, wastage_sales_file):
     day_order = pd.CategoricalDtype(categories=["Weekday", "Saturday", "Sunday"], ordered=True)
     avg_data_long['Day Type'] = avg_data_long['Day Type'].astype(day_order)
     avg_data_long = avg_data_long.sort_values(by=['Outlet', 'Item', 'Day Type']).reset_index(drop=True)
+    avg_data_long["Wastage Qty"] = avg_data_long["Wastage Qty"].fillna(0)
 
     # Compute total averages
     item_totals = (
@@ -119,10 +120,89 @@ def process_files(product_sales_file, wastage_sales_file):
     output_file_path = tmp_file.name
 
     with pd.ExcelWriter(output_file_path, engine="openpyxl") as writer:
-        for outlet, group in avg_data_long.groupby("Outlet"):
-            sheet_name = str(outlet).replace("Outlet: ", "")[:31]
-            group = group.drop(columns=["Outlet"])
-            group.to_excel(writer, sheet_name=sheet_name, index=False)
+
+        if forecast_file is None:
+            for outlet, group in avg_data_long.groupby("Outlet"):
+                sheet_name = str(outlet).replace("Outlet: ", "")[:31]
+                group = group.drop(columns=["Outlet"])
+                group.to_excel(writer, sheet_name=sheet_name, index=False)
+
+        # Add MV Forecast Comparison if forecast file is provided
+        else:
+            # forecast_mv = pd.read_excel(forecast_file, sheet_name="MV")
+            outlet_map = {
+                "MV": "Mid Valley",
+                "PV": "Pavilion",
+                "OU": "One Utama",
+                "SA": "AEON Shah Alam",
+                "QM": "Quayside Mall",
+                "MM": "Melawati Mall",
+                "KLE": "KL East Mall",
+                "KL": "Kuchai",
+                "DP": "Dpulze",
+                "SS2": "SS2",
+                "PD": "Paradigm",
+                "TP": "Taipan",
+                "MP": "Main Place",
+                "SW": "Sunway Pyramid",
+            }
+
+            for code, name in outlet_map.items():
+                forecast_df = pd.read_excel(forecast_file, sheet_name=code)
+                if code in ['MV', 'SA', 'QM']:
+                    forecast_df = forecast_df.rename(columns={
+                        "Item Name": "Item",
+                        "Mon - Thu": "Weekday",
+                        "Fri": "Weekday2",
+                        "Sat": "Saturday",
+                        "Sun": "Sunday"
+                    })
+                    forecast_df["Weekday"] = forecast_df[["Weekday", "Weekday2"]].mean(axis=1)
+                else:
+                    forecast_df = forecast_df.rename(columns={
+                        "Item Name": "Item",
+                        "Mon - Fri": "Weekday",
+                        "Sat": "Saturday",
+                        "Sun": "Sunday"
+                    })
+
+                forecast_long = forecast_df.melt(
+                    id_vars=["Item"],
+                    value_vars=["Weekday", "Saturday", "Sunday"],
+                    var_name="Day Type",
+                    value_name="Forecast Qty"
+                )
+
+                actual_df = avg_data_long[avg_data_long["Outlet"].str.contains(name, case=False)].copy()
+                actual_df["Total"] = actual_df["Qty"] + actual_df["Wastage Qty"]
+
+                comparison = pd.merge(
+                    actual_df,
+                    forecast_long,
+                    on=["Item", "Day Type"],
+                    how="left"
+                )
+                comparison["Variance"] = comparison["Total"] - comparison["Forecast Qty"]
+                # comparison["% Variance"] = (comparison["Variance"] / comparison["Forecast Qty"]) * 100
+                comparison = comparison.drop(columns=["Outlet", "Sales", "Wastage Sales"])
+
+                # Add Recommendation column based on conditions
+                def recommend(row):
+                    if (row["Variance"] <= -10) and (row["Wastage Qty"] <= 5):
+                        return "Increase Production (low wastage, under forecast)"
+                    elif (row["Variance"] >= 10) and (row["Wastage Qty"] >= 5):
+                        return "Decrease Production (high wastage, over forecast)"
+                    else:
+                        return "OK"
+
+                comparison["Recommendation"] = comparison.apply(recommend, axis=1)
+
+                # Keep Variance and % Variance numeric and rounded (no string '+')
+                comparison["Variance"] = pd.to_numeric(comparison["Variance"], errors="coerce").round(0)
+                # comparison["% Variance"] = pd.to_numeric(comparison["% Variance"], errors="coerce").round(0)
+
+                outlet_name = name
+                comparison.to_excel(writer, sheet_name=outlet_name, index=False)
 
     # Reopen and format
     wb = load_workbook(output_file_path)
@@ -194,6 +274,42 @@ def process_files(product_sales_file, wastage_sales_file):
             else:
                 ws.column_dimensions[col_letter].width = max_length + 2
 
+    # Apply conditional fills and number formats for Variance / % Variance in 'MV Forecast Comparison'
+    if forecast_file is not None:
+        for sheet_name in wb.sheetnames:
+            # if not sheet_name.endswith("Comparison"):
+            #     continue
+            # print(sheet_name)
+            ws_fc = wb[sheet_name]
+            header_row = ws_fc[1]
+
+            # Locate columns
+            variance_col = None
+            percent_col = None
+            for idx, cell in enumerate(header_row, 1):
+                if cell.value == "Variance":
+                    variance_col = idx
+                # elif cell.value == "% Variance":
+                #     percent_col = idx
+
+            # Number formats with explicit '+' for positives
+            if variance_col:
+                for row in range(2, ws_fc.max_row + 1):
+                    c = ws_fc.cell(row=row, column=variance_col)
+                    if isinstance(c.value, (int, float)):
+                        c.number_format = '+#,##0;-#,##0;0'
+                        # Color code by absolute variance thresholds
+                        if c.value >=10:
+                            c.fill = green_fill
+                        elif c.value <= -10:
+                            c.fill = red_fill
+
+            # if percent_col:
+            #     for row in range(2, ws_fc.max_row + 1):
+            #         c = ws_fc.cell(row=row, column=percent_col)
+            #         if isinstance(c.value, (int, float)):
+            #             c.number_format = '+0"%" ;-0"%" ;0"%"'
+
     wb.save(output_file_path)
     return output_file_path
 
@@ -204,12 +320,14 @@ st.write("Upload your **Product Sales** and **Wastage Sales** Excel files:")
 
 product_file = st.file_uploader("Product Sales File", type="xlsx")
 wastage_file = st.file_uploader("Wastage Sales File", type="xlsx")
+forecast_file = st.file_uploader("Forecast File (optional)", type="xlsx")
+
 
 if st.button("Generate Report"):
     if product_file and wastage_file:
         try:
             with st.spinner("Processing files..."):
-                output_path = process_files(product_file, wastage_file)
+                output_path = process_files(product_file, wastage_file, forecast_file)
             with open(output_path, "rb") as f:
                 st.download_button("⬇️ Download Report", f, file_name="avg_sales_by_outlet.xlsx")
             st.success("Report generated successfully!")
